@@ -1,6 +1,6 @@
 CC=gcc
-CFLAGS=-c -Wno-unused-result -O2 -std=gnu99
-LDFLAGS=
+CFLAGS=-c -pthread -Wno-unused-result -O2 -std=gnu99
+LDFLAGS=-pthread
 SOURCES=main.c
 OBJECTS=$(SOURCES:.c=.o)
 EXECUTABLE=proxy

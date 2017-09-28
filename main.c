@@ -13,6 +13,7 @@
 #include <netdb.h>
 #include <sys/select.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 
 #define BUFSIZE 65536
 #define IPSIZE 4
@@ -92,6 +93,12 @@ int readn(int fd, void *buf, int n)
 	return n;
 }
 
+void app_thread_exit(int ret, int fd)
+{
+	close(fd);
+	pthread_exit((void *)&ret);
+}
+
 int app_connect(int type, void *buf, unsigned short int portnum)
 {
 	int fd;
@@ -110,9 +117,8 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 		remote.sin_port = htons(portnum);
 
 		if (connect(fd, (struct sockaddr *)&remote, sizeof(remote)) < 0) {
-			close(fd);
 			log_message("connect() in app_connect");
-			exit(1);
+			return -1;
 		}
 
 		return fd;
@@ -144,8 +150,7 @@ int socks5_invitation(int fd)
 	readn(fd, (void *)init, ARRAY_SIZE(init));
 	if (init[0] != VERSION) {
 		log_message("Incompatible version!");
-		close(fd);
-		exit(1);
+		app_thread_exit(0, fd);
 	}
 	log_message("Initial %hhX %hhX", init[0], init[1]);
 	return init[1];
@@ -228,8 +233,7 @@ void socks5_auth(int fd, int methods_count)
 	}
 	if (supported == 0) {
 		socks5_auth_notsupported(fd);
-		close(fd);
-		exit(1);
+		app_thread_exit(1, fd);
 	}
 	int ret = 0;
 	switch (auth_type) {
@@ -243,8 +247,7 @@ void socks5_auth(int fd, int methods_count)
 	if (ret == 0) {
 		return;
 	} else {
-		close(fd);
-		exit(1);
+		app_thread_exit(1, fd);
 	}
 }
 
@@ -335,13 +338,11 @@ void app_socket_pipe(int fd0, int fd1)
 			send(fd0, (const void *)buffer_r, nread, 0);
 		}
 	}
-
-	close(fd0);
-	close(fd1);
 }
 
-void app_process(int net_fd)
+void *app_thread_process(void *fd)
 {
+	int net_fd = *(int *)fd;
 	char auth_methods = socks5_invitation(net_fd);
 	socks5_auth(net_fd, auth_methods);
 	int command = socks5_command(net_fd);
@@ -352,6 +353,9 @@ void app_process(int net_fd)
 		unsigned short int p = socks5_read_port(net_fd);
 
 		inet_fd = app_connect(IP, (void *)ip, ntohs(p));
+		if (inet_fd == -1) {
+			app_thread_exit(1, net_fd);
+		}
 		socks5_ip_send_response(net_fd, ip, p);
 		free(ip);
 	} else if (command == DOMAIN) {
@@ -360,12 +364,16 @@ void app_process(int net_fd)
 		unsigned short int p = socks5_read_port(net_fd);
 
 		inet_fd = app_connect(DOMAIN, (void *)address, ntohs(p));
+		if (inet_fd == -1) {
+			app_thread_exit(1, net_fd);
+		}
 		socks5_domain_send_response(net_fd, address, size, p);
 		free(address);
 	}
 
 	app_socket_pipe(inet_fd, net_fd);
-	exit(0);
+	close(inet_fd);
+	app_thread_exit(0, net_fd);
 }
 
 int app_loop()
@@ -406,6 +414,7 @@ int app_loop()
 
 	log_message("Listening port %d...", port);
 
+	pthread_t worker;
 	while (1) {
 		if ((net_fd =
 		     accept(sock_fd, (struct sockaddr *)&remote,
@@ -413,16 +422,10 @@ int app_loop()
 			log_message("accept()");
 			exit(1);
 		}
-		if ((pid = fork()) < 0) {
-			log_message("fork()");
-			exit(1);
+		if (pthread_create(&worker, NULL, &app_thread_process, (void *)&net_fd) == 0) {
+			pthread_detach(worker);
 		} else {
-			if (pid == 0) {
-				close(sock_fd);
-				app_process(net_fd);
-			} else {
-				close(net_fd);
-			}
+			log_message("pthread_create()");
 		}
 	}
 }
@@ -473,7 +476,6 @@ int main(int argc, char *argv[])
 			usage(argv[0]);
 		}
 	}
-	signal(SIGCHLD, SIG_IGN);
 	log_message("Starting with authtype %X", auth_type);
 	if (auth_type != NOAUTH) {
 		log_message("Username is %s, password is %s", arg_username,
