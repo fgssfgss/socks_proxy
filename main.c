@@ -24,6 +24,7 @@ int auth_type;
 char *arg_username;
 char *arg_password;
 FILE *log_file;
+pthread_mutex_t lock;
 
 enum socks {
 	RESERVED = 0x00,
@@ -70,9 +71,11 @@ void log_message(const char *message, ...)
 	date[strlen(date) - 1] = '\0';
 
 	if (errno != 0) {
+		pthread_mutex_lock(&lock);
 		fprintf(log_file, "[%s] Critical: %s - %s\n", date, vbuffer,
 			strerror(errno));
 		errno = 0;
+		pthread_mutex_unlock(&lock);
 	} else {
 		fprintf(log_file, "[%s] Info: %s\n", date, vbuffer);
 	}
@@ -448,6 +451,7 @@ int main(int argc, char *argv[])
 	auth_type = NOAUTH;
 	arg_username = "user";
 	arg_password = "pass";
+	pthread_mutex_init(&lock, NULL);
 
 	while ((ret = getopt(argc, argv, "n:u:p:l:a:h")) != -1) {
 		switch (ret) {
