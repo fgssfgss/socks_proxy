@@ -182,7 +182,6 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 				}
 			}
 			close(fd);
-			return -1;
 		}
 		freeaddrinfo(res);
 		return -1;

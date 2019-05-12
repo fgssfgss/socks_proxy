@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-c -pthread -Wno-unused-result -g -std=gnu99
+CFLAGS=-c -pthread -Wno-unused-result -O2 -std=gnu99
 LDFLAGS=-pthread
 SOURCES=main.c
 OBJECTS=$(SOURCES:.c=.o)
