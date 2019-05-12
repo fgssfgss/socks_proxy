@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/fcntl.h>
+#include <sys/stat.h>
 #include <netdb.h>
 #include <sys/select.h>
 #include <arpa/inet.h>
@@ -20,6 +22,7 @@
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
 unsigned short int port = 1080;
+int daemon_mode = 0;
 int auth_type;
 char *arg_username;
 char *arg_password;
@@ -59,6 +62,10 @@ enum socks_status {
 
 void log_message(const char *message, ...)
 {
+	if (daemon_mode) {
+		return;
+	}
+
 	char vbuffer[255];
 	va_list args;
 	va_start(args, message);
@@ -70,14 +77,16 @@ void log_message(const char *message, ...)
 	char *date = ctime(&now);
 	date[strlen(date) - 1] = '\0';
 
+	pthread_t self = pthread_self();
+
 	if (errno != 0) {
 		pthread_mutex_lock(&lock);
-		fprintf(log_file, "[%s] Critical: %s - %s\n", date, vbuffer,
-			strerror(errno));
+		fprintf(log_file, "[%s][%lu] Critical: %s - %s\n", date, self,
+			vbuffer, strerror(errno));
 		errno = 0;
 		pthread_mutex_unlock(&lock);
 	} else {
-		fprintf(log_file, "[%s] Info: %s\n", date, vbuffer);
+		fprintf(log_file, "[%s][%lu] Info: %s\n", date, self, vbuffer);
 	}
 	fflush(log_file);
 }
@@ -86,11 +95,37 @@ int readn(int fd, void *buf, int n)
 {
 	int nread, left = n;
 	while (left > 0) {
-		if ((nread = read(fd, buf, left)) == 0) {
-			return 0;
+		if ((nread = read(fd, buf, left)) == -1) {
+			if (errno == EINTR || errno == EAGAIN) {
+				continue;
+			}
 		} else {
-			left -= nread;
-			buf += nread;
+			if (nread == 0) {
+				return 0;
+			} else {
+				left -= nread;
+				buf += nread;
+			}
+		}
+	}
+	return n;
+}
+
+int writen(int fd, void *buf, int n)
+{
+	int nwrite, left = n;
+	while (left > 0) {
+		if ((nwrite = write(fd, buf, left)) == -1) {
+			if (errno == EINTR || errno == EAGAIN) {
+				continue;
+			}
+		} else {
+			if (nwrite == n) {
+				return 0;
+			} else {
+				left -= nwrite;
+				buf += nwrite;
+			}
 		}
 	}
 	return n;
@@ -109,7 +144,7 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 	char address[16];
 
 	memset(address, 0, ARRAY_SIZE(address));
-	fd = socket(AF_INET, SOCK_STREAM, 0);
+
 	if (type == IP) {
 		char *ip = buf;
 		snprintf(address, ARRAY_SIZE(address), "%hhu.%hhu.%hhu.%hhu",
@@ -119,8 +154,10 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 		remote.sin_addr.s_addr = inet_addr(address);
 		remote.sin_port = htons(portnum);
 
+		fd = socket(AF_INET, SOCK_STREAM, 0);
 		if (connect(fd, (struct sockaddr *)&remote, sizeof(remote)) < 0) {
 			log_message("connect() in app_connect");
+			close(fd);
 			return -1;
 		}
 
@@ -131,16 +168,21 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 		snprintf(portaddr, ARRAY_SIZE(portaddr), "%d", portnum);
 		log_message("getaddrinfo: %s %s", (char *)buf, portaddr);
 		int ret = getaddrinfo((char *)buf, portaddr, NULL, &res);
-		if (ret == 0) {
-			const struct addrinfo *r;
-			for (r = res; r != NULL || ret != 0; r = r->ai_next) {
-				ret =
-				    connect(fd, res->ai_addr, res->ai_addrlen);
+		if (ret == EAI_NODATA) {
+			return -1;
+		} else if (ret == 0) {
+			struct addrinfo *r;
+			for (r = res; r != NULL; r = r->ai_next) {
+				fd = socket(r->ai_family, r->ai_socktype,
+					    r->ai_protocol);
+				ret = connect(fd, r->ai_addr, r->ai_addrlen);
 				if (ret == 0) {
 					freeaddrinfo(res);
 					return fd;
 				}
 			}
+			close(fd);
+			return -1;
 		}
 		freeaddrinfo(res);
 		return -1;
@@ -186,7 +228,7 @@ char *socks5_auth_get_pass(int fd)
 int socks5_auth_userpass(int fd)
 {
 	char answer[2] = { VERSION, USERPASS };
-	write(fd, (void *)answer, ARRAY_SIZE(answer));
+	writen(fd, (void *)answer, ARRAY_SIZE(answer));
 	char resp;
 	readn(fd, (void *)&resp, sizeof(resp));
 	log_message("auth %hhX", resp);
@@ -196,13 +238,13 @@ int socks5_auth_userpass(int fd)
 	if (strcmp(arg_username, username) == 0
 	    && strcmp(arg_password, password) == 0) {
 		char answer[2] = { AUTH_VERSION, AUTH_OK };
-		write(fd, (void *)answer, ARRAY_SIZE(answer));
+		writen(fd, (void *)answer, ARRAY_SIZE(answer));
 		free(username);
 		free(password);
 		return 0;
 	} else {
 		char answer[2] = { AUTH_VERSION, AUTH_FAIL };
-		write(fd, (void *)answer, ARRAY_SIZE(answer));
+		writen(fd, (void *)answer, ARRAY_SIZE(answer));
 		free(username);
 		free(password);
 		return 1;
@@ -212,14 +254,14 @@ int socks5_auth_userpass(int fd)
 int socks5_auth_noauth(int fd)
 {
 	char answer[2] = { VERSION, NOAUTH };
-	write(fd, (void *)answer, ARRAY_SIZE(answer));
+	writen(fd, (void *)answer, ARRAY_SIZE(answer));
 	return 0;
 }
 
 void socks5_auth_notsupported(int fd)
 {
 	char answer[2] = { VERSION, NOMETHOD };
-	write(fd, (void *)answer, ARRAY_SIZE(answer));
+	writen(fd, (void *)answer, ARRAY_SIZE(answer));
 }
 
 void socks5_auth(int fd, int methods_count)
@@ -282,9 +324,9 @@ char *socks5_ip_read(int fd)
 void socks5_ip_send_response(int fd, char *ip, unsigned short int port)
 {
 	char response[4] = { VERSION, OK, RESERVED, IP };
-	write(fd, (void *)response, ARRAY_SIZE(response));
-	write(fd, (void *)ip, IPSIZE);
-	write(fd, (void *)&port, sizeof(port));
+	writen(fd, (void *)response, ARRAY_SIZE(response));
+	writen(fd, (void *)ip, IPSIZE);
+	writen(fd, (void *)&port, sizeof(port));
 }
 
 char *socks5_domain_read(int fd, unsigned char *size)
@@ -303,10 +345,10 @@ void socks5_domain_send_response(int fd, char *domain, unsigned char size,
 				 unsigned short int port)
 {
 	char response[4] = { VERSION, OK, RESERVED, DOMAIN };
-	write(fd, (void *)response, ARRAY_SIZE(response));
-	write(fd, (void *)&size, sizeof(size));
-	write(fd, (void *)domain, size * sizeof(char));
-	write(fd, (void *)&port, sizeof(port));
+	writen(fd, (void *)response, ARRAY_SIZE(response));
+	writen(fd, (void *)&size, sizeof(size));
+	writen(fd, (void *)domain, size * sizeof(char));
+	writen(fd, (void *)&port, sizeof(port));
 }
 
 void app_socket_pipe(int fd0, int fd1)
@@ -425,11 +467,53 @@ int app_loop()
 			log_message("accept()");
 			exit(1);
 		}
-		if (pthread_create(&worker, NULL, &app_thread_process, (void *)&net_fd) == 0) {
+		if (pthread_create
+		    (&worker, NULL, &app_thread_process,
+		     (void *)&net_fd) == 0) {
 			pthread_detach(worker);
 		} else {
 			log_message("pthread_create()");
 		}
+	}
+}
+
+void daemonize()
+{
+	pid_t pid;
+	int x;
+
+	pid = fork();
+
+	if (pid < 0) {
+		exit(EXIT_FAILURE);
+	}
+
+	if (pid > 0) {
+		exit(EXIT_SUCCESS);
+	}
+
+	if (setsid() < 0) {
+		exit(EXIT_FAILURE);
+	}
+
+	signal(SIGCHLD, SIG_IGN);
+	signal(SIGHUP, SIG_IGN);
+
+	pid = fork();
+
+	if (pid < 0) {
+		exit(EXIT_FAILURE);
+	}
+
+	if (pid > 0) {
+		exit(EXIT_SUCCESS);
+	}
+
+	umask(0);
+	chdir("/");
+
+	for (x = sysconf(_SC_OPEN_MAX); x >= 0; x--) {
+		close(x);
 	}
 }
 
@@ -453,8 +537,15 @@ int main(int argc, char *argv[])
 	arg_password = "pass";
 	pthread_mutex_init(&lock, NULL);
 
-	while ((ret = getopt(argc, argv, "n:u:p:l:a:h")) != -1) {
+	signal(SIGPIPE, SIG_IGN);
+
+	while ((ret = getopt(argc, argv, "n:u:p:l:a:hd")) != -1) {
 		switch (ret) {
+		case 'd':{
+				daemon_mode = 1;
+				daemonize();
+				break;
+			}
 		case 'n':{
 				port = atoi(optarg) & 0xffff;
 				break;
