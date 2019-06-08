@@ -2,8 +2,8 @@
 Socks5 proxy server written in one C file. 
 Can be used as example how to write your own. 
 
-#### Build status
-![TravisCI status](https://api.travis-ci.org/fgssfgss/socks_proxy.svg?branch=master)
+#### Build status and CI pipeline link
+[![Build Status](https://travis-ci.org/fgssfgss/socks_proxy.svg?branch=master)](https://travis-ci.org/fgssfgss/socks_proxy)
 
 #### Proto
 [Socks5 proto](https://tools.ietf.org/html/rfc1928)
