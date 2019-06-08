@@ -20,6 +20,7 @@
 #define BUFSIZE 65536
 #define IPSIZE 4
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
+#define ARRAY_INIT    {0}
 
 unsigned short int port = 1080;
 int daemon_mode = 0;
@@ -188,12 +189,19 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 	}
 }
 
+void socks5_invitation_fail(int fd)
+{
+	char response[2] = { VERSION, 0xff };
+	writen(fd, response, ARRAY_SIZE(response));
+}
+
 int socks5_invitation(int fd)
 {
 	char init[2];
 	readn(fd, (void *)init, ARRAY_SIZE(init));
 	if (init[0] != VERSION) {
 		log_message("Incompatible version!");
+		socks5_invitation_fail(fd);
 		app_thread_exit(0, fd);
 	}
 	log_message("Initial %hhX %hhX", init[0], init[1]);
@@ -413,6 +421,8 @@ void *app_thread_process(void *fd)
 		}
 		socks5_domain_send_response(net_fd, address, size, p);
 		free(address);
+	} else {
+		app_thread_exit(1, net_fd);
 	}
 
 	app_socket_pipe(inet_fd, net_fd);

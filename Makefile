@@ -15,3 +15,7 @@ $(EXECUTABLE): $(OBJECTS)
 
 clean:
 	rm -rf $(OBJECTS) $(EXECUTABLE)
+
+test:
+	@chmod +x test.sh
+	@bash ./test.sh

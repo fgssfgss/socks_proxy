@@ -1,0 +1,8 @@
+language: c
+sudo: false
+script:
+  - make
+  - make test
+
+after_success:
+  - echo SUCCESS
