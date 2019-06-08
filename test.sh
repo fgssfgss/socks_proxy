@@ -7,11 +7,13 @@ OUTLOG=log.txt
 PASSED=0
 
 start_server(){
-	"./${SERVER_NAME}" &>/dev/null &disown;
+	echo "Starting server"
+	"./${SERVER_NAME}" &>$OUTLOG &disown;
 	PID=$!
 }
 
 stop_server() {
+	echo "Stopping server"
 	kill -9 $PID
 }
 
@@ -24,6 +26,7 @@ send_request_without_proxy() {
 }
 
 check_ip_test() {
+	echo "Check ip test"
 	send_request_using_proxy $GETIP
 	send_request_without_proxy $GETIP
 	if [ "$VAL_PROXY" == "$VAL_WPROXY" ]; then
@@ -34,14 +37,17 @@ check_ip_test() {
 }
 
 stability_test() {
+	echo "Stability test"
 	for i in {1..10};
 	do send_request_using_proxy $GETIP && echo "Success";
 	done;
 }
 
-killall $SERVER_NAME &>/dev/null
+rm $OUTLOG
 start_server
 stability_test
 check_ip_test
 stop_server
-exit $PASSED
+
+echo "Server log:"
+cat $OUTLOG
