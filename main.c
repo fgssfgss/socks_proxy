@@ -32,7 +32,8 @@ pthread_mutex_t lock;
 
 enum socks {
 	RESERVED = 0x00,
-	VERSION = 0x05
+	VERSION4 = 0x04,
+	VERSION5 = 0x05
 };
 
 enum socks_auth_methods {
@@ -191,7 +192,7 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 
 void socks5_invitation_fail(int fd)
 {
-	char response[2] = { VERSION, 0xff };
+	char response[2] = { VERSION5, 0xff };
 	writen(fd, response, ARRAY_SIZE(response));
 }
 
@@ -199,7 +200,7 @@ int socks5_invitation(int fd)
 {
 	char init[2];
 	readn(fd, (void *)init, ARRAY_SIZE(init));
-	if (init[0] != VERSION) {
+	if (init[0] != VERSION5) {
 		log_message("Incompatible version!");
 		socks5_invitation_fail(fd);
 		app_thread_exit(0, fd);
@@ -234,7 +235,7 @@ char *socks5_auth_get_pass(int fd)
 
 int socks5_auth_userpass(int fd)
 {
-	char answer[2] = { VERSION, USERPASS };
+	char answer[2] = { VERSION5, USERPASS };
 	writen(fd, (void *)answer, ARRAY_SIZE(answer));
 	char resp;
 	readn(fd, (void *)&resp, sizeof(resp));
@@ -260,14 +261,14 @@ int socks5_auth_userpass(int fd)
 
 int socks5_auth_noauth(int fd)
 {
-	char answer[2] = { VERSION, NOAUTH };
+	char answer[2] = { VERSION5, NOAUTH };
 	writen(fd, (void *)answer, ARRAY_SIZE(answer));
 	return 0;
 }
 
 void socks5_auth_notsupported(int fd)
 {
-	char answer[2] = { VERSION, NOMETHOD };
+	char answer[2] = { VERSION5, NOMETHOD };
 	writen(fd, (void *)answer, ARRAY_SIZE(answer));
 }
 
@@ -330,7 +331,7 @@ char *socks5_ip_read(int fd)
 
 void socks5_ip_send_response(int fd, char *ip, unsigned short int port)
 {
-	char response[4] = { VERSION, OK, RESERVED, IP };
+	char response[4] = { VERSION5, OK, RESERVED, IP };
 	writen(fd, (void *)response, ARRAY_SIZE(response));
 	writen(fd, (void *)ip, IPSIZE);
 	writen(fd, (void *)&port, sizeof(port));
@@ -351,7 +352,7 @@ char *socks5_domain_read(int fd, unsigned char *size)
 void socks5_domain_send_response(int fd, char *domain, unsigned char size,
 				 unsigned short int port)
 {
-	char response[4] = { VERSION, OK, RESERVED, DOMAIN };
+	char response[4] = { VERSION5, OK, RESERVED, DOMAIN };
 	writen(fd, (void *)response, ARRAY_SIZE(response));
 	writen(fd, (void *)&size, sizeof(size));
 	writen(fd, (void *)domain, size * sizeof(char));
