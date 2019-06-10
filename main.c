@@ -360,6 +360,11 @@ void socks5_domain_send_response(int fd, char *domain, unsigned char size,
 	writen(fd, (void *)&port, sizeof(port));
 }
 
+int socks4_is_4_or_4a(char *ip)
+{
+	return (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] != 0);
+}
+
 int socks4_read_nstring(int fd, char *buf, int size)
 {
 	char sym = 0;
@@ -465,22 +470,18 @@ void *app_thread_process(void *fd)
 		}
 		case VERSION4: {
 			if (methods == 1) {
+				char ident[1024];
 				unsigned short int p = socks_read_port(net_fd);
 				char *ip = socks_ip_read(net_fd);
+				socks4_read_nstring(net_fd, ident, sizeof(ident));
 
-				if (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] != 0) {
-					char ident[255];
+				if (socks4_is_4_or_4a(ip)) {
 					char domain[255];
-
-					socks4_read_nstring(net_fd, ident, sizeof(ident));
 					socks4_read_nstring(net_fd, domain, sizeof(domain));
-
-					log_message("socks4a ident %s domain %s", ident, domain);
-
+					log_message("Socks4A: ident:%s; domain:%s;", ident, domain);
 					inet_fd = app_connect(DOMAIN, (void *)domain, ntohs(p));
 				} else {
-					log_message("socks4 by ip:port");
-
+					log_message("Socks4: connect by ip & port");
 					inet_fd = app_connect(IP, (void *)ip, ntohs(p));
 				}
 
