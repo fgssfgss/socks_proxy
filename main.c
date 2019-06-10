@@ -15,6 +15,7 @@
 #include <netdb.h>
 #include <sys/select.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 
 #define BUFSIZE 65536
@@ -148,7 +149,7 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 	memset(address, 0, ARRAY_SIZE(address));
 
 	if (type == IP) {
-		char *ip = buf;
+		char *ip = (char *)buf;
 		snprintf(address, ARRAY_SIZE(address), "%hhu.%hhu.%hhu.%hhu",
 			 ip[0], ip[1], ip[2], ip[3]);
 		memset(&remote, 0, sizeof(remote));
@@ -177,32 +178,32 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 			for (r = res; r != NULL; r = r->ai_next) {
 				fd = socket(r->ai_family, r->ai_socktype,
 					    r->ai_protocol);
+                if (fd == -1) {
+                    continue;
+                }
 				ret = connect(fd, r->ai_addr, r->ai_addrlen);
 				if (ret == 0) {
 					freeaddrinfo(res);
 					return fd;
-				}
+                } else {
+                    close(fd);
+                }
 			}
-			close(fd);
 		}
 		freeaddrinfo(res);
 		return -1;
 	}
-}
 
-void socks_invitation_fail(int fd)
-{
-	char response[2] = { VERSION5, 0xff };
-	writen(fd, response, ARRAY_SIZE(response));
+    return -1;
 }
 
 int socks_invitation(int fd, int *version)
 {
 	char init[2];
-	readn(fd, (void *)init, ARRAY_SIZE(init));
-	if (init[0] != VERSION5 && init[0] != VERSION4) {
+	int nread = readn(fd, (void *)init, ARRAY_SIZE(init));
+	if (nread == 2 && init[0] != VERSION5 && init[0] != VERSION4) {
+        log_message("They send us %hhX %hhX", init[0], init[1]);
 		log_message("Incompatible version!");
-		socks_invitation_fail(fd);
 		app_thread_exit(0, fd);
 	}
 	log_message("Initial %hhX %hhX", init[0], init[1]);
@@ -215,7 +216,7 @@ char *socks5_auth_get_user(int fd)
 	unsigned char size;
 	readn(fd, (void *)&size, sizeof(size));
 
-	char *user = malloc(sizeof(char) * size + 1);
+	char *user = (char *)malloc(sizeof(char) * size + 1);
 	readn(fd, (void *)user, (int)size);
 	user[size] = 0;
 
@@ -227,7 +228,7 @@ char *socks5_auth_get_pass(int fd)
 	unsigned char size;
 	readn(fd, (void *)&size, sizeof(size));
 
-	char *pass = malloc(sizeof(char) * size + 1);
+	char *pass = (char *)malloc(sizeof(char) * size + 1);
 	readn(fd, (void *)pass, (int)size);
 	pass[size] = 0;
 
@@ -324,7 +325,7 @@ unsigned short int socks_read_port(int fd)
 
 char *socks_ip_read(int fd)
 {
-	char *ip = malloc(sizeof(char) * IPSIZE);
+	char *ip = (char *)malloc(sizeof(char) * IPSIZE);
 	readn(fd, (void *)ip, IPSIZE);
 	log_message("IP %hhu.%hhu.%hhu.%hhu", ip[0], ip[1], ip[2], ip[3]);
 	return ip;
@@ -342,7 +343,7 @@ char *socks5_domain_read(int fd, unsigned char *size)
 {
 	unsigned char s;
 	readn(fd, (void *)&s, sizeof(s));
-	char *address = malloc((sizeof(char) * s) + 1);
+	char *address = (char *)malloc((sizeof(char) * s) + 1);
 	readn(fd, (void *)address, (int)s);
 	address[s] = 0;
 	log_message("Address %s", address);
@@ -360,7 +361,7 @@ void socks5_domain_send_response(int fd, char *domain, unsigned char size,
 	writen(fd, (void *)&port, sizeof(port));
 }
 
-int socks4_is_4_or_4a(char *ip)
+int socks4_is_4a(char *ip)
 {
 	return (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] != 0);
 }
@@ -401,6 +402,8 @@ void app_socket_pipe(int fd0, int fd1)
 	fd_set rd_set;
 	size_t nread;
 	char buffer_r[BUFSIZE];
+
+    log_message("Connecting two sockets");
 
 	maxfd = (fd0 > fd1) ? fd0 : fd1;
 	while (1) {
@@ -470,12 +473,12 @@ void *app_thread_process(void *fd)
 		}
 		case VERSION4: {
 			if (methods == 1) {
-				char ident[1024];
+				char ident[255];
 				unsigned short int p = socks_read_port(net_fd);
 				char *ip = socks_ip_read(net_fd);
 				socks4_read_nstring(net_fd, ident, sizeof(ident));
 
-				if (socks4_is_4_or_4a(ip)) {
+				if (socks4_is_4a(ip)) {
 					char domain[255];
 					socks4_read_nstring(net_fd, domain, sizeof(domain));
 					log_message("Socks4A: ident:%s; domain:%s;", ident, domain);
@@ -494,7 +497,9 @@ void *app_thread_process(void *fd)
 				}
 
 				free(ip);
-			}
+            } else {
+                log_message("Unsupported mode");
+            }
 			break;
 		}
 	}
@@ -502,11 +507,13 @@ void *app_thread_process(void *fd)
 	app_socket_pipe(inet_fd, net_fd);
 	close(inet_fd);
 	app_thread_exit(0, net_fd);
+
+    return NULL;
 }
 
 int app_loop()
 {
-	int sock_fd, net_fd, pid;
+	int sock_fd, net_fd;
 	int optval = 1;
 	struct sockaddr_in local, remote;
 	socklen_t remotelen;
@@ -532,7 +539,7 @@ int app_loop()
 		exit(1);
 	}
 
-	if (listen(sock_fd, 5) < 0) {
+	if (listen(sock_fd, 25) < 0) {
 		log_message("listen()");
 		exit(1);
 	}
@@ -550,6 +557,8 @@ int app_loop()
 			log_message("accept()");
 			exit(1);
 		}
+        int one = 1;
+        setsockopt(sock_fd, SOL_TCP, TCP_NODELAY, &one, sizeof(one));
 		if (pthread_create
 		    (&worker, NULL, &app_thread_process,
 		     (void *)&net_fd) == 0) {
