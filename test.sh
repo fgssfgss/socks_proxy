@@ -94,7 +94,7 @@ stability_test4a
 stability_test5
 #check_ip_test4
 #check_ip_test4a
-check_ip_test5
+#check_ip_test5
 stop_server
 
 echo "Server log:"
