@@ -190,22 +190,23 @@ int app_connect(int type, void *buf, unsigned short int portnum)
 	}
 }
 
-void socks5_invitation_fail(int fd)
+void socks_invitation_fail(int fd)
 {
 	char response[2] = { VERSION5, 0xff };
 	writen(fd, response, ARRAY_SIZE(response));
 }
 
-int socks5_invitation(int fd)
+int socks_invitation(int fd, int *version)
 {
 	char init[2];
 	readn(fd, (void *)init, ARRAY_SIZE(init));
-	if (init[0] != VERSION5) {
+	if (init[0] != VERSION5 && init[0] != VERSION4) {
 		log_message("Incompatible version!");
-		socks5_invitation_fail(fd);
+		socks_invitation_fail(fd);
 		app_thread_exit(0, fd);
 	}
 	log_message("Initial %hhX %hhX", init[0], init[1]);
+	*version = init[0];
 	return init[1];
 }
 
@@ -313,7 +314,7 @@ int socks5_command(int fd)
 	return command[3];
 }
 
-unsigned short int socks5_read_port(int fd)
+unsigned short int socks_read_port(int fd)
 {
 	unsigned short int p;
 	readn(fd, (void *)&p, sizeof(p));
@@ -321,7 +322,7 @@ unsigned short int socks5_read_port(int fd)
 	return p;
 }
 
-char *socks5_ip_read(int fd)
+char *socks_ip_read(int fd)
 {
 	char *ip = malloc(sizeof(char) * IPSIZE);
 	readn(fd, (void *)ip, IPSIZE);
@@ -357,6 +358,36 @@ void socks5_domain_send_response(int fd, char *domain, unsigned char size,
 	writen(fd, (void *)&size, sizeof(size));
 	writen(fd, (void *)domain, size * sizeof(char));
 	writen(fd, (void *)&port, sizeof(port));
+}
+
+int socks4_read_nstring(int fd, char *buf, int size)
+{
+	char sym = 0;
+	int nread = 0;
+	int i = 0;
+
+	while (i < size) {
+		nread = recv(fd, &sym, sizeof(char), 0);
+
+		if (nread <= 0) {
+			break;
+		} else {
+			buf[i] = sym;
+			i++;
+		}
+
+		if (sym == 0) {
+			break;
+		}
+	}
+
+	return i;
+}
+
+void socks4_send_response(int fd, int status)
+{
+	char resp[8] = {0x00, (char)status, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+	writen(fd, (void *)resp, ARRAY_SIZE(resp));
 }
 
 void app_socket_pipe(int fd0, int fd1)
@@ -396,34 +427,75 @@ void app_socket_pipe(int fd0, int fd1)
 void *app_thread_process(void *fd)
 {
 	int net_fd = *(int *)fd;
-	char auth_methods = socks5_invitation(net_fd);
-	socks5_auth(net_fd, auth_methods);
-	int command = socks5_command(net_fd);
-
+	int version = 0;
 	int inet_fd = -1;
-	if (command == IP) {
-		char *ip = socks5_ip_read(net_fd);
-		unsigned short int p = socks5_read_port(net_fd);
+	char methods = socks_invitation(net_fd, &version);
 
-		inet_fd = app_connect(IP, (void *)ip, ntohs(p));
-		if (inet_fd == -1) {
-			app_thread_exit(1, net_fd);
-		}
-		socks5_ip_send_response(net_fd, ip, p);
-		free(ip);
-	} else if (command == DOMAIN) {
-		unsigned char size;
-		char *address = socks5_domain_read(net_fd, &size);
-		unsigned short int p = socks5_read_port(net_fd);
+	switch (version) {
+	case VERSION5: {
+			socks5_auth(net_fd, methods);
+			int command = socks5_command(net_fd);
 
-		inet_fd = app_connect(DOMAIN, (void *)address, ntohs(p));
-		if (inet_fd == -1) {
-			app_thread_exit(1, net_fd);
+			if (command == IP) {
+				char *ip = socks_ip_read(net_fd);
+				unsigned short int p = socks_read_port(net_fd);
+
+				inet_fd = app_connect(IP, (void *)ip, ntohs(p));
+				if (inet_fd == -1) {
+					app_thread_exit(1, net_fd);
+				}
+				socks5_ip_send_response(net_fd, ip, p);
+				free(ip);
+				break;
+			} else if (command == DOMAIN) {
+				unsigned char size;
+				char *address = socks5_domain_read(net_fd, &size);
+				unsigned short int p = socks_read_port(net_fd);
+
+				inet_fd = app_connect(DOMAIN, (void *)address, ntohs(p));
+				if (inet_fd == -1) {
+					app_thread_exit(1, net_fd);
+				}
+				socks5_domain_send_response(net_fd, address, size, p);
+				free(address);
+				break;
+			} else {
+				app_thread_exit(1, net_fd);
+			}
 		}
-		socks5_domain_send_response(net_fd, address, size, p);
-		free(address);
-	} else {
-		app_thread_exit(1, net_fd);
+		case VERSION4: {
+			if (methods == 1) {
+				unsigned short int p = socks_read_port(net_fd);
+				char *ip = socks_ip_read(net_fd);
+
+				if (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] != 0) {
+					char ident[255];
+					char domain[255];
+
+					socks4_read_nstring(net_fd, ident, sizeof(ident));
+					socks4_read_nstring(net_fd, domain, sizeof(domain));
+
+					log_message("socks4a ident %s domain %s", ident, domain);
+
+					inet_fd = app_connect(DOMAIN, (void *)domain, ntohs(p));
+				} else {
+					log_message("socks4 by ip:port");
+
+					inet_fd = app_connect(IP, (void *)ip, ntohs(p));
+				}
+
+				if (inet_fd != -1) {
+					socks4_send_response(net_fd, 0x5a);
+				} else {
+					socks4_send_response(net_fd, 0x5b);
+					free(ip);
+					app_thread_exit(1, net_fd);
+				}
+
+				free(ip);
+			}
+			break;
+		}
 	}
 
 	app_socket_pipe(inet_fd, net_fd);
